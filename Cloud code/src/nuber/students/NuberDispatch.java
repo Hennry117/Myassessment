@@ -1,143 +1,82 @@
 package nuber.students;
 
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.Queue;
-import java.util.concurrent.Future;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Callable;
-import java.util.concurrent.Future;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * The core Dispatch class that instantiates and manages everything for Nuber
- *
- * @author james
- *
- */
 public class NuberDispatch {
-	private final int MAX_DRIVERS = 999;
-	private boolean logEvents = false;
-	private Queue<Driver> availableDrivers;
-	private HashMap<String, NuberRegion> regions;
-	private int bookingsAwaitingDriver;
-	private ExecutorService bookingExecutor;
-	/**
-	 * The maximum number of idle drivers that can be awaiting a booking
-	 */
 
-	/**
-	 * Creates a new dispatch objects and instantiates the required regions and any other objects required.
-	 * It should be able to handle a variable number of regions based on the HashMap provided.
-	 *
-	 * @param regionInfo Map of region names and the max simultaneous bookings they can handle
-	 * @param logEvents Whether logEvent should print out events passed to it
-	 */
-	public NuberDispatch(HashMap<String, Integer> regionInfo, boolean logEvents)
-	{
+	private static final int MAX_DRIVERS = 999;
+	private final boolean logEvents;
+	private final BlockingQueue<Driver> idleDrivers = new LinkedBlockingQueue<>();
+
+	public NuberDispatch(Map<String, Integer> regionInfo, boolean logEvents) {
 		this.logEvents = logEvents;
-		this.availableDrivers = new LinkedList<>();
-		this.regions = new HashMap<>();
-		this.bookingExecutor = Executors.newCachedThreadPool();
+		this.executorService = Executors.newFixedThreadPool(MAX_DRIVERS);
 
-		// Initialize regions based on the regionInfo map
-		for (String regionName : regionInfo.keySet()) {
-			regions.put(regionName, new NuberRegion(this, regionName, regionInfo.get(regionName)));
+		for (Map.Entry<String, Integer> entry : regionInfo.entrySet()) {
+			String regionName = entry.getKey();
+			int maxBookings = entry.getValue();
+			regions.put(regionName, new NuberRegion(this, regionName, maxBookings));
 		}
 	}
 
-	/**
-	 * Adds drivers to a queue of idle driver.
-	 *
-	 * Must be able to have drivers added from multiple threads.
-	 *
-	 * @param The driver to add to the queue.
-	 * @return Returns true if driver was added to the queue
-	 */
-	public boolean addDriver(Driver newDriver)
-	{
-		if (availableDrivers.size() < MAX_DRIVERS) {
-			availableDrivers.offer(newDriver);
+
+	private final Map<String, NuberRegion> regions = new HashMap<>();
+	private final AtomicInteger bookingsAwaitingDriver = new AtomicInteger(0);
+	private final ExecutorService executorService;
+
+	public synchronized boolean addDriver(Driver newDriver) {
+		if (idleDrivers.size() < MAX_DRIVERS) {
+			idleDrivers.add(newDriver);
 			return true;
 		}
 		return false;
 	}
 
-	/**
-	 * Gets a driver from the front of the queue
-	 *
-	 * Must be able to have drivers added from multiple threads.
-	 *
-	 * @return A driver that has been removed from the queue
-	 */
-	public Driver getDriver()
-	{
-		return availableDrivers.poll();
+	public Driver getAvailableDriver() throws InterruptedException {
+		return idleDrivers.take();
 	}
 
-	/**
-	 * Prints out the string
-	 * 	    booking + ": " + message
-	 * to the standard output only if the logEvents variable passed into the constructor was true
-	 *
-	 * @param booking The booking that's responsible for the event occurring
-	 * @param message The message to show
-	 */
+	public void addAvailableDriver(Driver driver) {
+		idleDrivers.offer(driver);
+	}
+
 	public void logEvent(Booking booking, String message) {
-
-		if (!logEvents) return;
-
-		System.out.println(booking + ": " + message);
-
+		if (logEvents) {
+			System.out.println(booking + ": " + message);
+		}
 	}
 
-	/**
-	 * Books a given passenger into a given Nuber region.
-	 *
-	 * Once a passenger is booked, the getBookingsAwaitingDriver() should be returning one higher.
-	 *
-	 * If the region has been asked to shutdown, the booking should be rejected, and null returned.
-	 *
-	 * @param passenger The passenger to book
-	 * @param region The region to book them into
-	 * @return returns a Future<BookingResult> object
-	 */
 	public Future<BookingResult> bookPassenger(Passenger passenger, String region) {
-		NuberRegion targetRegion = regions.get(region);
-		if (targetRegion == null) {
-			logEvent(null, "Region " + region + " not found.");
-			return null;
+		NuberRegion nuberRegion = regions.get(region);
+		if (nuberRegion == null || nuberRegion.isShutdown()) {
+			return CompletableFuture.completedFuture(null);
 		}
 
-		Future<BookingResult> futureBooking = targetRegion.bookPassenger(passenger);
-		if (futureBooking != null) {
-			synchronized (this) {
-				bookingsAwaitingDriver++;
-			}
-		}
-		return futureBooking;
+		bookingsAwaitingDriver.incrementAndGet();
+
+		return executorService.submit(() -> {
+			Booking booking = new Booking(this, passenger);
+			return booking.call();
+		});
 	}
 
-	/**
-	 * Gets the number of non-completed bookings that are awaiting a driver from dispatch
-	 *
-	 * Once a driver is given to a booking, the value in this counter should be reduced by one
-	 *
-	 * @return Number of bookings awaiting driver, across ALL regions
-	 */
-	public synchronized int getBookingsAwaitingDriver()
-	{
-		return bookingsAwaitingDriver;
+	public int getBookingsAwaitingDriver() {
+		return bookingsAwaitingDriver.get();
 	}
 
-	/**
-	 * Tells all regions to finish existing bookings already allocated, and stop accepting new bookings
-	 */
 	public void shutdown() {
-		for (NuberRegion region : regions.values()) {
-			region.shutdown();
-		}
-		bookingExecutor.shutdown();
-	}
+		regions.values().forEach(NuberRegion::shutdown);
+		executorService.shutdown();
 
+		try {
+			if (!executorService.awaitTermination(60, TimeUnit.SECONDS)) {
+				executorService.shutdownNow();
+			}
+		} catch (InterruptedException e) {
+			executorService.shutdownNow();
+			Thread.currentThread().interrupt();
+		}
+	}
 }

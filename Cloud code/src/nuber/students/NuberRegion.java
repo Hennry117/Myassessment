@@ -14,6 +14,13 @@ public class NuberRegion {
 	private final AtomicInteger activeBookings = new AtomicInteger(0);
 	private volatile boolean isShutdown = false;
 
+	/**
+	 * Constructor for the NuberRegion class.
+	 *
+	 * @param dispatch          The dispatch service reference.
+	 * @param regionName        The name of the region.
+	 * @param maxSimultaneousJobs The maximum number of simultaneous jobs.
+	 */
 	public NuberRegion(NuberDispatch dispatch, String regionName, int maxSimultaneousJobs) {
 		this.dispatch = dispatch;
 		this.regionName = regionName;
@@ -28,9 +35,9 @@ public class NuberRegion {
 						executorService.submit(() -> {
 							try {
 								BookingResult result = booking.call();
-								dispatch.logEvent(booking, "Booking completed: " + result);
+								dispatch.logEvent(booking, "Booking completed for " + booking.getPassenger().getName() + ": " + result);
 							} catch (Exception e) {
-								dispatch.logEvent(booking, "Error in booking: " + e.getMessage());
+								dispatch.logEvent(booking, "Error processing booking for " + booking.getPassenger().getName() + ": " + e.getMessage());
 							} finally {
 								activeBookings.decrementAndGet();
 							}
@@ -49,9 +56,15 @@ public class NuberRegion {
 		bookingProcessor.start();
 	}
 
+	/**
+	 * Books a ride for a passenger.
+	 *
+	 * @param waitingPassenger The waiting passenger.
+	 * @return A Future representing the booking result.
+	 */
 	public Future<BookingResult> bookPassenger(Passenger waitingPassenger) {
 		if (isShutdown) {
-			dispatch.logEvent(null, "Booking rejected: Region " + regionName + " is shutting down.");
+			dispatch.logEvent(null, "Booking request rejected: " + regionName + " is shutting down.");
 			return null;
 		}
 
@@ -72,6 +85,9 @@ public class NuberRegion {
 		return future;
 	}
 
+	/**
+	 * Shuts down the region and releases resources.
+	 */
 	public void shutdown() {
 		isShutdown = true;
 		executorService.shutdown();
@@ -85,6 +101,11 @@ public class NuberRegion {
 		}
 	}
 
+	/**
+	 * Gets the shutdown status of the region.
+	 *
+	 * @return True if the region is shut down, false otherwise.
+	 */
 	public boolean isShutdown() {
 		return isShutdown;
 	}

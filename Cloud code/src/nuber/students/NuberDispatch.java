@@ -1,4 +1,4 @@
-package nuber.students;
+package nuber.students; // Define the package this class belongs to
 
 import java.util.*; // Import the collections framework
 import java.util.concurrent.*; // Import concurrent utilities
